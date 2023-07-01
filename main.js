@@ -1,10 +1,13 @@
-const { InstanceBase, Regex, runEntrypoint, InstanceStatus } = require('@companion-module/base')
-const UpgradeScripts = require('./upgrades')
-const UpdateActions = require('./actions')
-const UpdateFeedbacks = require('./feedbacks')
-const UpdateVariableDefinitions = require('./variables')
+import { InstanceBase, Regex, runEntrypoint, InstanceStatus } from '@companion-module/base'
+import { getActions } from './actions.js'
+import { getPresets } from './presets.js'
+import { getVariables } from './variables.js'
+import { getFeedbacks } from './feedbacks.js'
+import UpgradeScripts from './upgrades.js'
 
-class ModuleInstance extends InstanceBase {
+import OSC from 'osc'
+
+class QuickQInstance extends InstanceBase {
 	constructor(internal) {
 		super(internal)
 	}
@@ -12,52 +15,111 @@ class ModuleInstance extends InstanceBase {
 	async init(config) {
 		this.config = config
 
-		this.updateStatus(InstanceStatus.Ok)
+		this.updateStatus(InstanceStatus.Connecting)
 
-		this.updateActions() // export actions
-		this.updateFeedbacks() // export feedbacks
-		this.updateVariableDefinitions() // export variable definitions
+		this.initActions()
+		this.initPresets()
+		this.initVariables()
+		this.initFeedbacks()
+
+		if (this.config.host) {
+			this.updateStatus(InstanceStatus.Ok)
+			this.initOSC()
+		} else {
+			this.updateStatus('bad_config', 'Missing IP Address')
+		}
 	}
-	// When module gets deleted
+
 	async destroy() {
+		if (this.listener) {
+			this.listener.close()
+		}
+
 		this.log('debug', 'destroy')
 	}
 
 	async configUpdated(config) {
 		this.config = config
+
+		this.initOSC()
 	}
 
-	// Return config fields for web config
 	getConfigFields() {
 		return [
 			{
 				type: 'textinput',
 				id: 'host',
-				label: 'Target IP',
+				label: 'Device IP',
 				width: 8,
 				regex: Regex.IP,
-			},
-			{
-				type: 'textinput',
-				id: 'port',
-				label: 'Target Port',
-				width: 4,
-				regex: Regex.PORT,
 			},
 		]
 	}
 
-	updateActions() {
-		UpdateActions(this)
+	initVariables() {
+		const variables = getVariables.bind(this)()
+		this.setVariableDefinitions(variables)
 	}
 
-	updateFeedbacks() {
-		UpdateFeedbacks(this)
+	initFeedbacks() {
+		const feedbacks = getFeedbacks.bind(this)()
+		this.setFeedbackDefinitions(feedbacks)
 	}
 
-	updateVariableDefinitions() {
-		UpdateVariableDefinitions(this)
+	initPresets() {
+		const presets = getPresets.bind(this)()
+		this.setPresetDefinitions(presets)
+	}
+
+	initActions() {
+		const actions = getActions.bind(this)()
+		this.setActionDefinitions(actions)
+	}
+
+	sendCommand(command, value) {
+		if (value || value === 0) {
+			this.oscSend(this.config.host, 8000, `${command}`, [
+				{
+					type: 'i',
+					value: value,
+				},
+			])
+		} else {
+			this.oscSend(this.config.host, 8000, `${command}`, [])
+		}
+	}
+
+	initOSC() {
+		this.states = {}
+
+		if (this.listener) {
+			this.listener.close()
+		}
+
+		this.listener = new OSC.UDPPort({
+			localAddress: '0.0.0.0',
+			localPort: 9000,
+			broadcast: true,
+			metadata: true,
+		})
+
+		this.listener.open()
+		this.listener.on('ready', () => {
+			console.log('open')
+			this.updateStatus(InstanceStatus.Ok)
+			this.sendCommand('/feedback/pb+exec')
+		})
+		this.listener.on('error', (err) => {
+			if (err.code == 'EADDRINUSE') {
+				this.log('error', `Error: Selected feedback port ${err.message.split(':')[1]} is already in use.`)
+				this.updateStatus('bad_config', 'Feedback port conflict')
+			}
+		})
+
+		this.listener.on('message', (message) => {
+			let value = message?.args[0]?.value
+		})
 	}
 }
 
-runEntrypoint(ModuleInstance, UpgradeScripts)
+runEntrypoint(QuickQInstance, UpgradeScripts)
